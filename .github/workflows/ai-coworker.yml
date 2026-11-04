@@ -1,0 +1,113 @@
+# AI Coworker: runs one task from your project tool on this repository's own GitHub Actions runner.
+# Your code, secrets and environment variables stay in GitHub. AI Coworker starts the run; the runner proves which
+# repository it is with GitHub's OIDC identity token (no stored secret), and only the result goes back: the branch,
+# the pull request and the preview link. Delete this file to switch it off.
+name: AI Coworker
+run-name: "AI Coworker task ${{ inputs.job }}"
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: AI Coworker task id
+        required: true
+      api:
+        description: AI Coworker API address
+        required: true
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+  deployments: read
+jobs:
+  task:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      JOB: ${{ inputs.job }}
+      API: ${{ inputs.api }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Start the task
+        run: |
+          set -euo pipefail
+          OIDC=$(curl -sSf -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=ai-coworker" | jq -r .value)
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          jq -n --arg job "$JOB" --arg oidc "$OIDC" --arg run "$RUN_URL" '{job:$job,oidc:$oidc,run_url:$run}' \
+            | curl -sSf -X POST "$API/v1/ci/start" -H 'content-type: application/json' --data-binary @- > /tmp/task.json
+          TOKEN=$(jq -r .token /tmp/task.json); echo "::add-mask::$TOKEN"
+          echo "AICW_TOKEN=$TOKEN" >> "$GITHUB_ENV"
+          jq -r .instruction /tmp/task.json > /tmp/instruction.md
+          echo "BRANCH=$(jq -r .branch /tmp/task.json)" >> "$GITHUB_ENV"
+          echo "BUILD=$(jq -r '.build // ""' /tmp/task.json)" >> "$GITHUB_ENV"
+          echo "PUBLISH_DIR=$(jq -r '.publish_dir // ""' /tmp/task.json)" >> "$GITHUB_ENV"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Make the change (AI agent; runs the build and fixes errors)
+        run: |
+          set -uo pipefail
+          git switch -c "$BRANCH"
+          if [ -f package-lock.json ]; then npm ci --no-audit --no-fund || true; elif [ -f package.json ]; then npm install --no-audit --no-fund || true; fi
+          ARGS=(--model openai/coworker --no-stream --yes-always --no-auto-commits --no-gitignore --no-check-update --no-show-model-warnings --no-analytics --map-tokens 1024)
+          if [ -n "$BUILD" ]; then ARGS+=(--test-cmd "$BUILD" --auto-test); fi
+          OPENAI_API_BASE="$API/v1/llm" OPENAI_API_KEY="$AICW_TOKEN" pipx run --spec aider-chat aider "${ARGS[@]}" --message-file /tmp/instruction.md > /tmp/agent.log 2>&1 || echo "agent exited with $?" >> /tmp/agent.log
+          tail -c 6000 /tmp/agent.log
+      - name: Build
+        id: build
+        run: |
+          if [ -z "$BUILD" ]; then echo "status=none" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if bash -c "$BUILD" > /tmp/build.log 2>&1; then echo "status=ok" >> "$GITHUB_OUTPUT"; else echo "status=failed" >> "$GITHUB_OUTPUT"; tail -c 3000 /tmp/build.log; fi
+      - name: Commit and open the pull request
+        id: pr
+        run: |
+          set -uo pipefail
+          git config user.name "AI Coworker"
+          git config user.email "ai-coworker@users.noreply.github.com"
+          rm -f .aider.chat.history.md .aider.input.history; rm -rf .aider.tags.cache.v*
+          git add -A
+          if git diff --cached --quiet; then echo "changed=no" >> "$GITHUB_OUTPUT"; exit 0; fi
+          TITLE="AI Coworker: $(head -c 80 /tmp/instruction.md | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+          git commit -q -m "$TITLE" -m "Task $JOB"
+          git push -q origin "$BRANCH"
+          PR=$(gh pr create --head "$BRANCH" --title "$TITLE" --body "Made by AI Coworker for task $JOB. Build: ${{ steps.build.outputs.status }}." 2>/dev/null || gh pr view "$BRANCH" --json url -q .url)
+          echo "url=$PR" >> "$GITHUB_OUTPUT"; echo "changed=yes" >> "$GITHUB_OUTPUT"; echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Find the preview
+        id: preview
+        if: steps.pr.outputs.changed == 'yes'
+        run: |
+          set -uo pipefail
+          URL=""
+          # 1) a hosting integration (Vercel, Netlify, Cloudflare Pages...) reports a deployment for the commit
+          for i in $(seq 1 12); do
+            DEP=$(gh api "repos/$GITHUB_REPOSITORY/deployments?sha=${{ steps.pr.outputs.sha }}" -q '.[0].id' 2>/dev/null || true)
+            if [ -n "$DEP" ]; then URL=$(gh api "repos/$GITHUB_REPOSITORY/deployments/$DEP/statuses" -q '[.[] | select(.state=="success")][0] | (.environment_url // .target_url // "")' 2>/dev/null || true); fi
+            [ -n "$URL" ] && break
+            git ls-remote --exit-code --heads origin gh-pages > /dev/null 2>&1 && break
+            sleep 15
+          done
+          # 2) otherwise, when the repository publishes a gh-pages branch, the built site goes there, one folder per branch
+          if [ -z "$URL" ] && [ "${{ steps.build.outputs.status }}" != "failed" ] && git ls-remote --exit-code --heads origin gh-pages > /dev/null 2>&1; then
+            DIR=""; for d in "$PUBLISH_DIR" dist build out public .; do if [ -n "$d" ] && [ -f "$d/index.html" ]; then DIR="$d"; break; fi; done
+            if [ -n "$DIR" ]; then
+              SAFE=$(echo "$BRANCH" | tr '/' '-'); git fetch -q origin gh-pages; git worktree add -q /tmp/pages origin/gh-pages
+              rm -rf "/tmp/pages/previews/$SAFE"; mkdir -p "/tmp/pages/previews/$SAFE"; (cd "$DIR" && tar cf - --exclude=.git --exclude=node_modules .) | (cd "/tmp/pages/previews/$SAFE" && tar xf -)
+              (cd /tmp/pages && git add -A && git commit -qm "Preview for $BRANCH" && git push -q origin HEAD:gh-pages)
+              OWNER="${GITHUB_REPOSITORY%%/*}"; NAME="${GITHUB_REPOSITORY#*/}"
+              URL="https://${OWNER,,}.github.io/$NAME/previews/$SAFE/"
+            fi
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+      - name: Report back
+        if: always()
+        run: |
+          STATUS=done
+          [ "${{ job.status }}" != "success" ] && STATUS=failed
+          [ "${{ steps.pr.outputs.changed }}" == "no" ] && STATUS=no_changes
+          tail -c 6000 /tmp/agent.log > /tmp/agent.tail 2>/dev/null || : > /tmp/agent.tail
+          jq -n --arg status "$STATUS" --arg pr "${{ steps.pr.outputs.url }}" --arg preview "${{ steps.preview.outputs.url }}" \
+                --arg build "${{ steps.build.outputs.status }}" --rawfile log /tmp/agent.tail \
+                '{status:$status, pr_url:$pr, preview_url:$preview, build_status:$build, log_tail:$log}' \
+            | curl -sS -X POST "$API/v1/ci/report" -H "authorization: Bearer ${AICW_TOKEN:-none}" -H 'content-type: application/json' --data-binary @- || true
