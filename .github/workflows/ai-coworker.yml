@@ -60,7 +60,7 @@ jobs:
         run: |
           if [ -z "$BUILD" ]; then echo "status=none" >> "$GITHUB_OUTPUT"; exit 0; fi
           if bash -c "$BUILD" > /tmp/build.log 2>&1; then echo "status=ok" >> "$GITHUB_OUTPUT"; else echo "status=failed" >> "$GITHUB_OUTPUT"; tail -c 3000 /tmp/build.log; fi
-      - name: Commit and open the pull request
+      - name: Commit and push the branch (AI Coworker opens the pull request)
         id: pr
         run: |
           set -uo pipefail
@@ -72,8 +72,7 @@ jobs:
           TITLE="AI Coworker: $(head -c 80 /tmp/instruction.md | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
           git commit -q -m "$TITLE" -m "Task $JOB"
           git push -q origin "$BRANCH"
-          PR=$(gh pr create --head "$BRANCH" --title "$TITLE" --body "Made by AI Coworker for task $JOB. Build: ${{ steps.build.outputs.status }}." 2>/dev/null || gh pr view "$BRANCH" --json url -q .url)
-          echo "url=$PR" >> "$GITHUB_OUTPUT"; echo "changed=yes" >> "$GITHUB_OUTPUT"; echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "changed=yes" >> "$GITHUB_OUTPUT"; echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Find the preview
         id: preview
         if: steps.pr.outputs.changed == 'yes'
@@ -107,7 +106,7 @@ jobs:
           [ "${{ job.status }}" != "success" ] && STATUS=failed
           [ "${{ steps.pr.outputs.changed }}" == "no" ] && STATUS=no_changes
           tail -c 6000 /tmp/agent.log > /tmp/agent.tail 2>/dev/null || : > /tmp/agent.tail
-          jq -n --arg status "$STATUS" --arg pr "${{ steps.pr.outputs.url }}" --arg preview "${{ steps.preview.outputs.url }}" \
+          jq -n --arg status "$STATUS" --arg sha "${{ steps.pr.outputs.sha }}" --arg preview "${{ steps.preview.outputs.url }}" \
                 --arg build "${{ steps.build.outputs.status }}" --rawfile log /tmp/agent.tail \
-                '{status:$status, pr_url:$pr, preview_url:$preview, build_status:$build, log_tail:$log}' \
+                '{status:$status, sha:$sha, preview_url:$preview, build_status:$build, log_tail:$log}' \
             | curl -sS -X POST "$API/v1/ci/report" -H "authorization: Bearer ${AICW_TOKEN:-none}" -H 'content-type: application/json' --data-binary @- || true
