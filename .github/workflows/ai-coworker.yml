@@ -43,6 +43,7 @@ jobs:
           echo "BRANCH=$(jq -r .branch /tmp/task.json)" >> "$GITHUB_ENV"
           echo "BUILD=$(jq -r '.build // ""' /tmp/task.json)" >> "$GITHUB_ENV"
           echo "PUBLISH_DIR=$(jq -r '.publish_dir // ""' /tmp/task.json)" >> "$GITHUB_ENV"
+          echo "PROTECT=$(jq -r '(.protect // []) | join(" ")' /tmp/task.json)" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -57,7 +58,15 @@ jobs:
           elif [ -f package.json ]; then npm install --no-audit --no-fund --no-package-lock || true; fi
           ARGS=(--model openai/coworker --no-stream --yes-always --no-auto-commits --no-gitignore --no-check-update --no-show-model-warnings --no-analytics --map-tokens 1024)
           if [ -n "$BUILD" ]; then ARGS+=(--test-cmd "$BUILD" --auto-test); fi
+          # the build and test scripts are the referee: the agent may read them, never edit them
+          for f in $PROTECT; do [ -f "$f" ] && ARGS+=(--read "$f"); done
           OPENAI_API_BASE="$API/v1/llm" OPENAI_API_KEY="$AICW_TOKEN" pipx run --spec aider-chat aider "${ARGS[@]}" --message-file /tmp/instruction.md > /tmp/agent.log 2>&1 || echo "agent exited with $?" >> /tmp/agent.log
+          # and if it changed them anyway (or anything under .github/), put them back before the real build runs
+          for f in $( (git diff --name-only; git ls-files --others --exclude-standard) | sort -u ); do
+            hit=no; case "$f" in .github/*) hit=yes;; esac
+            for p in $PROTECT; do [ "$f" = "$p" ] && hit=yes; done
+            if [ "$hit" = yes ]; then git checkout -q -- "$f" 2>/dev/null || rm -f -- "$f"; echo "AI Coworker kept unchanged: $f" | tee -a /tmp/agent.log; fi
+          done
           tail -c 6000 /tmp/agent.log
       - name: Build
         id: build
