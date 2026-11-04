@@ -50,7 +50,11 @@ jobs:
         run: |
           set -uo pipefail
           git switch -c "$BRANCH"
-          if [ -f package-lock.json ]; then npm ci --no-audit --no-fund || true; elif [ -f package.json ]; then npm install --no-audit --no-fund || true; fi
+          # install the project's dependencies with its own lock file; never add a lock file the project does not have
+          if [ -f package-lock.json ]; then npm ci --no-audit --no-fund || true
+          elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile || true
+          elif [ -f yarn.lock ]; then corepack enable && yarn install --frozen-lockfile || true
+          elif [ -f package.json ]; then npm install --no-audit --no-fund --no-package-lock || true; fi
           ARGS=(--model openai/coworker --no-stream --yes-always --no-auto-commits --no-gitignore --no-check-update --no-show-model-warnings --no-analytics --map-tokens 1024)
           if [ -n "$BUILD" ]; then ARGS+=(--test-cmd "$BUILD" --auto-test); fi
           OPENAI_API_BASE="$API/v1/llm" OPENAI_API_KEY="$AICW_TOKEN" pipx run --spec aider-chat aider "${ARGS[@]}" --message-file /tmp/instruction.md > /tmp/agent.log 2>&1 || echo "agent exited with $?" >> /tmp/agent.log
