@@ -1,18 +1,45 @@
-// Build: copy src/ to dist/ and refuse broken pages (a title, balanced section/div tags, no empty links).
-import fs from 'node:fs'; import path from 'node:path';
-fs.rmSync('dist', { recursive: true, force: true }); fs.mkdirSync('dist');
+import { readFileSync, copyFileSync, mkdirSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+
+const SRC = 'src';
+const OUT = 'dist';
 let errors = 0;
-for (const f of fs.readdirSync('src')) {
-  const s = fs.readFileSync(path.join('src', f), 'utf8');
-  if (f.endsWith('.html')) {
-    if (!/<title>[^<]+<\/title>/.test(s)) { console.error(`${f}: missing <title>`); errors++; }
-    for (const tag of ['section', 'div', 'main', 'header', 'footer']) {
-      const open = (s.match(new RegExp(`<${tag}[\\s>]`, 'g')) || []).length, close = (s.match(new RegExp(`</${tag}>`, 'g')) || []).length;
-      if (open !== close) { console.error(`${f}: <${tag}> opened ${open} times, closed ${close} times`); errors++; }
-    }
-    if (/href=""/.test(s)) { console.error(`${f}: empty link`); errors++; }
+
+const files = readdirSync(SRC);
+
+for (const f of files) {
+  if (!f.endsWith('.html')) continue;
+
+  const s = readFileSync(join(SRC, f), 'utf8');
+
+  if (!/<title>[^<]*<\/title>/.test(s)) {
+    console.error(`${f}: missing <title>`);
+    errors++;
   }
-  fs.copyFileSync(path.join('src', f), path.join('dist', f));
+
+  if (/href=""/.test(s)) {
+    console.error(`${f}: empty link`);
+    errors++;
+  }
+
+  for (const tag of ['main', 'header', 'footer', 'section', 'div']) {
+    const open = (s.match(new RegExp(`<${tag}[\\s>]`, 'g')) || []).length;
+    const close = (s.match(new RegExp(`</${tag}>`, 'g')) || []).length;
+    if (open !== close) {
+      console.error(`${f}: unbalanced <${tag}> (${open} open, ${close} close)`);
+      errors++;
+    }
+  }
 }
-if (errors) { console.error(`build failed: ${errors} problem(s)`); process.exit(1); }
-console.log(`built ${fs.readdirSync('dist').length} files`);
+
+if (errors) {
+  console.error(`build failed: ${errors} problem(s)`);
+  process.exit(1);
+}
+
+mkdirSync(OUT, { recursive: true });
+for (const f of files) {
+  copyFileSync(join(SRC, f), join(OUT, f));
+}
+
+console.log('build ok');
