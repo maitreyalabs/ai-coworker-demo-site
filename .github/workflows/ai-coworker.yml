@@ -58,15 +58,23 @@ jobs:
           elif [ -f package.json ]; then npm install --no-audit --no-fund --no-package-lock || true; fi
           ARGS=(--model openai/coworker --no-stream --yes-always --no-auto-commits --no-gitignore --no-check-update --no-show-model-warnings --no-analytics --map-tokens 1024)
           if [ -n "$BUILD" ]; then ARGS+=(--test-cmd "$BUILD" --auto-test); fi
-          # the build and test scripts are the referee: the agent may read them, never edit them
+          # the build script, tests and CI files check the work: the agent may read them, never edit them
+          set -f
           for f in $PROTECT; do [ -f "$f" ] && ARGS+=(--read "$f"); done
+          set +f
           OPENAI_API_BASE="$API/v1/llm" OPENAI_API_KEY="$AICW_TOKEN" pipx run --spec aider-chat aider "${ARGS[@]}" --message-file /tmp/instruction.md > /tmp/agent.log 2>&1 || echo "agent exited with $?" >> /tmp/agent.log
-          # and if it changed them anyway (or anything under .github/), put them back before the real build runs
-          for f in $( (git diff --name-only; git ls-files --others --exclude-standard) | sort -u ); do
-            hit=no; case "$f" in .github/*) hit=yes;; esac
-            for p in $PROTECT; do [ "$f" = "$p" ] && hit=yes; done
-            if [ "$hit" = yes ]; then git checkout -q -- "$f" 2>/dev/null || rm -f -- "$f"; echo "AI Coworker kept unchanged: $f" | tee -a /tmp/agent.log; fi
-          done
+          # if it changed them anyway, put them back before the real build runs (new files are fine, except under .github/)
+          restore() { git checkout -q HEAD -- "$1" 2>/dev/null || { git rm -q -f --cached -- "$1" > /dev/null 2>&1 || true; rm -f -- "$1"; }; echo "$1" >> /tmp/kept.txt; }
+          : > /tmp/kept.txt
+          set -f
+          while IFS= read -r f; do
+            for p in '.github/*' $PROTECT; do case "$f" in $p) restore "$f"; break;; esac; done
+          done < <(git -c core.quotepath=off diff HEAD --name-only --no-renames --diff-filter=MDT)
+          while IFS= read -r f; do
+            case "$f" in .github/*) restore "$f";; esac
+          done < <(git -c core.quotepath=off diff HEAD --name-only --no-renames --diff-filter=A; git -c core.quotepath=off ls-files --others --exclude-standard)
+          set +f
+          if [ -s /tmp/kept.txt ]; then { echo "AI Coworker kept these files unchanged (they check the work):"; cat /tmp/kept.txt; } | tee -a /tmp/agent.log; fi
           tail -c 6000 /tmp/agent.log
       - name: Build
         id: build
@@ -119,7 +127,8 @@ jobs:
           [ "${{ job.status }}" != "success" ] && STATUS=failed
           [ "${{ steps.pr.outputs.changed }}" == "no" ] && STATUS=no_changes
           tail -c 6000 /tmp/agent.log > /tmp/agent.tail 2>/dev/null || : > /tmp/agent.tail
+          [ -f /tmp/kept.txt ] || : > /tmp/kept.txt
           jq -n --arg status "$STATUS" --arg sha "${{ steps.pr.outputs.sha }}" --arg preview "${{ steps.preview.outputs.url }}" \
-                --arg build "${{ steps.build.outputs.status }}" --rawfile log /tmp/agent.tail \
-                '{status:$status, sha:$sha, preview_url:$preview, build_status:$build, log_tail:$log}' \
+                --arg build "${{ steps.build.outputs.status }}" --rawfile log /tmp/agent.tail --rawfile kept /tmp/kept.txt \
+                '{status:$status, sha:$sha, preview_url:$preview, build_status:$build, log_tail:$log, kept:($kept | split("\n") | map(select(length > 0)))}' \
             | curl -sS -X POST "$API/v1/ci/report" -H "authorization: Bearer ${AICW_TOKEN:-none}" -H 'content-type: application/json' --data-binary @- || true
