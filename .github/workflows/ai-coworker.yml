@@ -50,7 +50,8 @@ jobs:
       - name: Make the change (AI agent; runs the build and fixes errors)
         run: |
           set -uo pipefail
-          git switch -c "$BRANCH"
+          # a follow-up in the same card continues that card's open pull request: build on its branch (AICW_CONTINUE)
+          if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null 2>&1; then git fetch -q origin "$BRANCH" && git switch -q -c "$BRANCH" FETCH_HEAD; else git switch -c "$BRANCH"; fi
           # install the project's dependencies with its own lock file; never add a lock file the project does not have
           if [ -f package-lock.json ]; then npm ci --no-audit --no-fund || true
           elif [ -f pnpm-lock.yaml ]; then corepack enable && pnpm install --frozen-lockfile || true
