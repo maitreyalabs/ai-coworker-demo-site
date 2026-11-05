@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Acme Launch</title><link rel="stylesheet" href="styles.css"></head>
+<body>
+<header><b>Acme</b></header>
+<main>
+  <section class="hero"><h1>Plan launches without the chaos</h1><p>One board for the whole team.</p></section>
+  <section class="pricing">
+    <div class="toggle-wrapper">
+      <span class="toggle-label">Monthly</span>
+      <label class="toggle-switch">
+        <input type="checkbox" id="billing-toggle">
+        <span class="toggle-slider"></span>
+      </label>
+      <span class="toggle-label">Annual</span>
+    </div>
+    <div class="pricing-cards">
+      <div class="card">
+        <h3>Starter</h3>
+        <p class="price" data-monthly="TODO" data-annual="TODO">TODO</p>
+        <p>Essential tools for small teams.</p>
+      </div>
+      <div class="card">
+        <h3>Pro</h3>
+        <p class="price" data-monthly="TODO" data-annual="TODO">TODO</p>
+        <span class="badge">2 months free</span>
+        <p>Everything you need to scale.</p>
+      </div>
+    </div>
+  </section>
+</main>
+<footer>© Acme</footer>
+<script>
+  const toggle = document.getElementById('billing-toggle');
+  const prices = document.querySelectorAll('.price');
+  function updatePrices() {
+    const isAnnual = toggle.checked;
+    prices.forEach(el => {
+      el.textContent = isAnnual ? el.dataset.annual : el.dataset.monthly;
+    });
+  }
+  toggle.addEventListener('change', updatePrices);
+  updatePrices();
+</script>
+</body></html>
